@@ -35,7 +35,6 @@ async def worker(semaphore, browser, url, index, total, f_out):
 
             name = await get_clean_text(page, "h1")
             
-            # Fallback: If H1 fails, use the page Title (YC usually puts company name there)
             if not name:
                 name = await page.title()
                 name = name.replace(" | Y Combinator", "").strip()
