@@ -7,14 +7,15 @@ INPUT_FILE = "final_yc_links.jsonl"
 OUTPUT_FILE = "yc_detailed_data.jsonl"
 CONCURRENCY = 5
 
-async def get_clean_text(page, selector):
-    """Helper to get text even if the element is 'hidden' or weird."""
+async def extract_field(page, selector, attribute=None):
     try:
         element = page.locator(selector).first
-        await element.wait_for(state="attached", timeout=10000)
-        return await element.evaluate("el => el.textContent")
+        await element.wait_for(state="attached", timeout=5000)
+        if attribute:
+            return await element.get_attribute(attribute)
+        return await element.evaluate("el => el.textContent.trim()")
     except:
-        return None
+        return "N/A"
 
 async def worker(semaphore, browser, url, index, total, f_out):
     async with semaphore:
@@ -24,35 +25,66 @@ async def worker(semaphore, browser, url, index, total, f_out):
         )
         page = await context.new_page()
         
-        print(f"[{index+1}/{total}] Processing: {url}")
+        print(f"[{index+1}/{total}] Deep Scraping: {url}")
         
         try:
-            # We use 'commit' (the moment the URL starts loading) 
-            # instead of waiting for full load, then we handle the wait ourselves.
-            await page.goto(url, wait_until="commit", timeout=60000)
+            await page.goto(url, wait_until="networkidle", timeout=60000)
             
-            await asyncio.sleep(2) # Small buffer for JS to kick in
+            page_title = await page.title()
+            name_from_tab = page_title.replace(" | Y Combinator", "").strip()
 
-            name = await get_clean_text(page, "h1")
-            
-            if not name:
-                name = await page.title()
-                name = name.replace(" | Y Combinator", "").strip()
+            try:
+                await page.wait_for_function('document.querySelector("h1")?.innerText.length > 0', timeout=5000)
+                name = await page.inner_text("h1")
+            except:
+                name = name_from_tab
 
-            description = await get_clean_text(page, "p.whitespace-pre-line") or "N/A"
+            one_liner = "N/A"
+            one_liner_loc = page.locator("div.text-xl")
+            if await one_liner_loc.count() > 0:
+                one_liner = await one_liner_loc.first.inner_text()
+
+            stats = {}
+            rows = await page.locator(".flex.flex-row.justify-between").all()
+            for row in rows:
+                row_text = await row.inner_text()
+                if "\n" in row_text:
+                    k, v = row_text.split("\n", 1)
+                    stats[k.strip()] = v.strip()
+
+            founders = []
+            founder_section = page.locator("section:has-text('Founders')")
+            if await founder_section.count() > 0:
+                names = await founder_section.locator("div.font-bold").all_inner_texts()
+                founders = [f.strip() for f in names if f.strip() and f.strip() not in ["Founders", "Active Founders"]]
+
+            website = "N/A"
+            links = await page.locator("a[href^='http']").all()
+            for link in links:
+                href = await link.get_attribute("href")
+                # Strict ignore list for YC/StartupSchool/Socials
+                if href and not any(x in href.lower() for x in ["ycombinator.com", "startupschool.org", "twitter.com", "linkedin.com", "facebook.com"]):
+                    website = href
+                    break
 
             data = {
                 "company_name": name,
-                "description": description[:500],
+                "one_liner": one_liner,
+                "description": await page.locator(".whitespace-pre-line").first.inner_text() if await page.locator(".whitespace-pre-line").count() > 0 else "N/A",
+                "batch": stats.get("Batch", "N/A"),
+                "location": stats.get("Location", "N/A"),
+                "team_size": stats.get("Team Size", "N/A"),
+                "founders": list(set(founders)),
+                "website": website,
                 "url": url
             }
             
             f_out.write(json.dumps(data) + '\n')
             f_out.flush()
-            print(f"✓ Success: {name}")
+            print(f"✓ Scraped: {name}")
 
         except Exception as e:
-            print(f"× Failed {url}: {str(e)[:50]}")
+            print(f"× Error on {url}: {str(e)[:100]}")
         finally:
             await context.close()
 
